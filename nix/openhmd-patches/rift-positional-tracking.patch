@@ -1,0 +1,11 @@
+--- a/src/drv_oculus_rift/rift.c
++++ b/src/drv_oculus_rift/rift.c
+@@ -1444,6 +1444,8 @@ static void get_device_list(ohmd_driver* driver, ohmd_device_list* list)
+ 		
+ 				desc->device_class = OHMD_DEVICE_CLASS_HMD;
+ 				desc->device_flags = OHMD_DEVICE_FLAGS_ROTATIONAL_TRACKING;
++				if (desc->revision == REV_CV1)
++					desc->device_flags |= OHMD_DEVICE_FLAGS_POSITIONAL_TRACKING;
+ 
+ 				strcpy(desc->path, cur_dev->path);
+ 
