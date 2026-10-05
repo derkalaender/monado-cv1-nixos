@@ -23,6 +23,10 @@ stdenv.mkDerivation {
     hash = "sha256-djjqWviFQi8ExE6TZIbITrishnYc4TDXpeyiBHm0NAA=";
   };
 
+  patches = [
+    ./openhmd-patches/opencv-lookup.patch
+  ];
+
   nativeBuildInputs = [
     meson
     ninja

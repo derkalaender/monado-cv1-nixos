@@ -1,0 +1,29 @@
+--- a/.gitignore
++++ b/.gitignore
+@@ -13,3 +13,4 @@ tests/unittests/unittests
+ .cproject
+ .project
+ build/
++.cache/
+--- a/meson.build
++++ b/meson.build
+@@ -38,14 +38,15 @@ if not dep_libusb.found()
+ 	dep_libusb = proj_hidapi.get_variable('libusb_dep')
+ endif
+ dep_threads = dependency('threads')
++# Find OpenCV
+ dep_opencv = dependency('opencv', required: false)
+ if not dep_opencv.found()
+-	# search via cmake for OpenCV5
+-        dep_opencv = dependency('OpenCV', method: 'cmake', modules: ['opencv_core', 'opencv_calib'])
++	# OpenCV 4 ships 'opencv4.pc'; plain 'opencv' is the OpenCV 5 name.
++	dep_opencv = dependency('opencv4', required: false)
+ endif
+ if not dep_opencv.found()
+-        # Try OpenCV4
+-        dep_opencv = dependency('OpenCV', method: 'cmake', modules: ['opencv_core', 'opencv_calib3d'])
++	# Last resort: CMake
++	dep_opencv = dependency('OpenCV', method: 'cmake', modules: ['opencv_core', 'opencv_calib3d'])
+ endif
+ 
+ dep_jpeg = dependency('libjpeg', required: false)
