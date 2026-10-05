@@ -26,6 +26,7 @@ stdenv.mkDerivation {
   patches = [
     ./openhmd-patches/opencv-lookup.patch
     ./openhmd-patches/rift-positional-tracking.patch
+    ./openhmd-patches/rift-imu-bias-offsets.patch
   ];
 
   nativeBuildInputs = [
