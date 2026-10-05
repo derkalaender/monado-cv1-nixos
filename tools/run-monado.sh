@@ -28,6 +28,9 @@ if [ ! -x "$out/bin/monado-service" ]; then
   exit 1
 fi
 
+# Keep the OpenXR registration pointing at the build we are about to run.
+"$repo/tools/set-openxr-runtime.sh"
+
 # A stale pid file makes the next start exit 255.
 rm -f "$XDG_RUNTIME_DIR/monado.pid"
 
