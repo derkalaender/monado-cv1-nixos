@@ -52,7 +52,28 @@
     "root": {
       "inputs": {
         "flake-parts": "flake-parts",
-        "nixpkgs": "nixpkgs"
+        "nixpkgs": "nixpkgs",
+        "treefmt-nix": "treefmt-nix"
+      }
+    },
+    "treefmt-nix": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1791200396,
+        "narHash": "sha256-11vMICjXf29xBRtaEi3EOlAYbui6DM+oesfYLeeAOas=",
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "rev": "9486d9b1ddf1a4296f194e4750c31206587b84dd",
+        "type": "github"
+      },
+      "original": {
+        "owner": "numtide",
+        "repo": "treefmt-nix",
+        "type": "github"
       }
     }
   },
