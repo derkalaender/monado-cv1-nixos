@@ -38,6 +38,8 @@ stdenv.mkDerivation {
 
   mesonFlags = [
     "-Ddrivers=rift"
+    # Monado links libusb itself for its own drivers, hidraw backend would be conflicting.
+    "-Dhidapi=libusb"
     "-Dexamples="
     "-Dtests=false"
   ];
