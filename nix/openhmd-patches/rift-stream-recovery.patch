@@ -1,0 +1,305 @@
+--- a/src/drv_oculus_rift/correspondence_search.c
++++ b/src/drv_oculus_rift/correspondence_search.c
+@@ -482,8 +482,8 @@ check_led_against_model_subset (correspondence_search_t *cs, cs_model_info_t *mi
+       ovec3f_subtract (&checkpos, &blob0, &tmp);
+       l = ovec3f_get_length (&tmp);
+       if (!(l <= 0.0025)) {
+-	      printf ("Error pose candidate orient %f %f %f %f pos %f %f %f "
+-            "Anchor LED %f %f %f projected to %f %f %f (err %f)\n",
++	      LOGD ("Error pose candidate orient %f %f %f %f pos %f %f %f "
++            "Anchor LED %f %f %f projected to %f %f %f (err %f)",
+             pose.orient.x, pose.orient.y, pose.orient.z, pose.orient.w,
+             pose.pos.x, pose.pos.y, pose.pos.z,
+             blob0.x, blob0.y, blob0.z,
+--- a/src/drv_oculus_rift/rift-sensor-device.h
++++ b/src/drv_oculus_rift/rift-sensor-device.h
+@@ -35,6 +35,10 @@ struct rift_sensor_device_funcs {
+ 	bool (*start) (rift_sensor_device *device, uint8_t min_frames, rift_sensor_device_frame_cb frame_cb, void *cb_data);
+ 	void (*stop) (rift_sensor_device *device);
+ 	void (*free) (rift_sensor_device *device);
++	/* Optional (may be NULL): recover the video stream if it stopped
++	 * delivering frames. Called periodically from a thread that is
++	 * neither the libusb event thread nor a frame callback. */
++	void (*check_health) (rift_sensor_device *device);
+ };
+ 
+ struct rift_sensor_device {
+@@ -47,5 +51,9 @@ struct rift_sensor_device {
+ 
+ #define rift_sensor_device_stop_video(d) (d)->funcs->stop((d))
+ #define rift_sensor_device_free(d) (d)->funcs->free((d))
++#define rift_sensor_device_check_health(d) do { \
++		if ((d)->funcs->check_health != NULL) \
++			(d)->funcs->check_health((d)); \
++	} while (0)
+ 
+ #endif
+--- a/src/drv_oculus_rift/rift-sensor-usb.c
++++ b/src/drv_oculus_rift/rift-sensor-usb.c
+@@ -27,12 +27,14 @@ typedef struct rift_sensor_usb_device rift_sensor_usb_device;
+ static bool rift_sensor_usb_start (rift_sensor_device *device, uint8_t min_frames, rift_sensor_device_frame_cb frame_cb, void *cb_data);
+ static void rift_sensor_usb_stop (rift_sensor_device *device);
+ static void rift_sensor_usb_free (rift_sensor_device *device);
++static void rift_sensor_usb_check_health (rift_sensor_device *device);
+ 
+ static rift_sensor_device_funcs usb_device_funcs =
+ {
+ 	rift_sensor_usb_start,
+ 	rift_sensor_usb_stop,
+ 	rift_sensor_usb_free,
++	rift_sensor_usb_check_health,
+ };
+ 
+ struct rift_sensor_usb_device
+@@ -282,6 +284,32 @@ rift_sensor_usb_stop (rift_sensor_device *dev)
+ 	}
+ }
+ 
++/* A desynced iso stream delivers nothing but short frames from then on, at the
++ * camera's rate; a stream that works drops the odd frame and resets the count
++ * on every complete one. 60 frames is about a second at 54 fps. */
++#define STREAM_DESYNC_FRAMES 60
++
++static void
++rift_sensor_usb_check_health (rift_sensor_device *base_dev)
++{
++	rift_sensor_usb_device *dev = (rift_sensor_usb_device *)(base_dev);
++
++	if (!dev->stream_started)
++		return;
++
++	if (dev->uvc_stream.consecutive_short_frames < STREAM_DESYNC_FRAMES)
++		return;
++
++	LOGW("Sensor %d (%s): video stream desynced (%d consecutive short frames) - restarting stream",
++	     dev->id, dev->serial_no, dev->uvc_stream.consecutive_short_frames);
++
++	if (rift_sensor_uvc_stream_soft_restart(&dev->uvc_stream) < 0) {
++		LOGE("Sensor %d (%s): stream restart failed - this sensor stays dead until restart",
++		     dev->id, dev->serial_no);
++		dev->stream_started = false;
++	}
++}
++
+ void
+ rift_sensor_usb_free (rift_sensor_device *base_dev)
+ {
+--- a/src/drv_oculus_rift/rift-sensor.c
++++ b/src/drv_oculus_rift/rift-sensor.c
+@@ -391,6 +391,12 @@ rift_sensor_start(rift_sensor_ctx *sensor)
+ 	return rift_sensor_device_start_video (sensor->dev, NUM_CAPTURE_BUFFERS + 1, frame_captured_cb, sensor);
+ }
+ 
++void
++rift_sensor_check_video_health(rift_sensor_ctx *sensor)
++{
++	rift_sensor_device_check_health (sensor->dev);
++}
++
+ void
+ rift_sensor_free (rift_sensor_ctx *sensor_ctx)
+ {
+--- a/src/drv_oculus_rift/rift-sensor.h
++++ b/src/drv_oculus_rift/rift-sensor.h
+@@ -79,6 +79,9 @@ void rift_sensor_free (rift_sensor_ctx *sensor_ctx);
+ const char *rift_sensor_serial_no (rift_sensor_ctx *sensor);
+ bool rift_sensor_add_device (rift_sensor_ctx *ctx, rift_tracked_device *device);
+ bool rift_sensor_start(rift_sensor_ctx *sensor);
++/* Recover the sensor's video stream if it stopped delivering frames. Call
++ * periodically, and not from the USB event thread or a frame callback. */
++void rift_sensor_check_video_health(rift_sensor_ctx *sensor);
+ 
+ void rift_sensor_set_pose(rift_sensor_ctx *sensor, posef *camera_pose);
+ 
+--- a/src/drv_oculus_rift/rift-tracker.c
++++ b/src/drv_oculus_rift/rift-tracker.c
+@@ -593,6 +593,18 @@ rift_tracker_free (rift_tracker_ctx *tracker_ctx)
+ 	free (tracker_ctx);
+ }
+ 
++void
++rift_tracker_check_sensor_health(rift_tracker_ctx *ctx)
++{
++	int i;
++
++	if (ctx == NULL)
++		return;
++
++	for (i = 0; i < ctx->n_sensors; i++)
++		rift_sensor_check_video_health(ctx->sensors[i]);
++}
++
+ void rift_tracked_device_imu_update(rift_tracked_device *dev_base, uint64_t local_ts, uint32_t device_ts, float dt, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field)
+ {
+ 	rift_tracked_device_priv *dev = (rift_tracked_device_priv *) (dev_base);
+--- a/src/drv_oculus_rift/rift-tracker.h
++++ b/src/drv_oculus_rift/rift-tracker.h
+@@ -25,6 +25,9 @@ bool rift_tracker_frame_captured (rift_tracker_ctx *ctx, uint64_t local_ts, uint
+ void rift_tracker_frame_release (rift_tracker_ctx *ctx, uint64_t local_ts, uint64_t frame_local_ts, rift_tracker_exposure_info *info, const char *source);
+ 
+ void rift_tracker_free (rift_tracker_ctx *ctx);
++/* Recover any sensor video stream that stopped delivering frames. Call
++ * periodically, and not from the USB event thread or a frame callback. */
++void rift_tracker_check_sensor_health(rift_tracker_ctx *ctx);
+ 
+ void rift_tracked_device_imu_update(rift_tracked_device *dev, uint64_t local_ts, uint32_t device_ts, float dt, const vec3f* ang_vel, const vec3f* accel, const vec3f* mag_field);
+ void rift_tracked_device_get_view_pose(rift_tracked_device *dev, posef *pose, vec3f *vel, vec3f *accel, vec3f *ang_vel);
+--- a/src/drv_oculus_rift/rift.c
++++ b/src/drv_oculus_rift/rift.c
+@@ -78,6 +78,9 @@ struct rift_hmd_s {
+ 
+ 	rift_tracker_ctx *tracker_ctx;
+ 
++	/* Timestamp of the last periodic sensor-stream health check */
++	uint64_t last_sensor_health_check_ns;
++
+ 	/* OpenHMD output devices */
+ 	rift_device_priv hmd_dev;
+ 	rift_touch_controller_t touch_dev[2];
+@@ -562,6 +565,15 @@ static void update_hmd(rift_hmd_t *priv)
+ 	bool got_a_msg = false;
+ 	uint64_t start = ohmd_monotonic_get(priv->ctx);
+ 
++	/* Once a second, restart any sensor video stream that stopped delivering
++	 * frames. Safe here: the tracker's USB event thread keeps pumping while
++	 * the recovery drains the transfers. */
++	if (priv->tracker_ctx != NULL &&
++	    start - priv->last_sensor_health_check_ns > 1000000000ULL) {
++		priv->last_sensor_health_check_ns = start;
++		rift_tracker_check_sensor_health(priv->tracker_ctx);
++	}
++
+ 	// Handle keep alive messages
+ 	double t = ohmd_get_tick();
+ 	if(t - priv->last_keep_alive >= (double)priv->sensor_config.keep_alive_interval / 1000.0 - .2){
+--- a/src/drv_oculus_rift/sensor/uvc.c
++++ b/src/drv_oculus_rift/sensor/uvc.c
+@@ -162,7 +162,7 @@ void process_payload(struct rift_sensor_uvc_stream *stream, unsigned char *paylo
+ 		 * when we see the frame change: */
+ 		if (stream->frame_collected != 0 && pts != stream->cur_pts &&
+ 				stream->format != OHMD_VIDEO_FRAME_FORMAT_JPEG) {
+-			printf("UVC PTS changed in-frame at %u bytes. Lost %u ms\n",
++			LOGD("UVC PTS changed in-frame at %u bytes. Lost %u ms",
+ 			    stream->frame_collected,
+ 			    (pts - stream->cur_pts) * 1000 / RIFT_SENSOR_CLOCK_FREQ);
+ 			stream->cur_pts = pts;
+@@ -179,9 +179,20 @@ void process_payload(struct rift_sensor_uvc_stream *stream, unsigned char *paylo
+ 		uint64_t time;
+ 
+ 		if (stream->frame_collected > 0) {
+-			printf("UVC Dropping short frame: %u < %u (%d lost)\n",
+-						stream->frame_collected, stream->frame_size,
+-						stream->frame_size - stream->frame_collected);
++			stream->consecutive_short_frames++;
++			stream->short_frames_since_log++;
++			/* A desynced stream drops every frame at camera rate, so
++			 * log the first of a burst and then only summaries. */
++			if (stream->short_frames_since_log == 1) {
++				LOGW("UVC Dropping short frame: %u < %u (%d lost)",
++							stream->frame_collected, stream->frame_size,
++							stream->frame_size - stream->frame_collected);
++			} else if (stream->short_frames_since_log >= 256) {
++				LOGW("UVC Dropped %d more short frames (last: %u < %u)",
++							stream->short_frames_since_log,
++							stream->frame_collected, stream->frame_size);
++				stream->short_frames_since_log = 0;
++			}
+ 		}
+ 
+ 		/* Start of new frame */
+@@ -267,6 +278,8 @@ void process_payload(struct rift_sensor_uvc_stream *stream, unsigned char *paylo
+ 	}
+ 
+ 	if (stream->frame_collected == stream->frame_size || is_eof) {
++		stream->consecutive_short_frames = 0;
++		stream->short_frames_since_log = 0;
+ 		stream->cur_frame->data_size = stream->frame_collected;
+ 		if (stream->frame_cb) {
+ 			stream->frame_cb(stream, stream->cur_frame, stream->frame_cb_data);
+@@ -581,6 +594,58 @@ int rift_sensor_uvc_stream_stop(struct rift_sensor_uvc_stream *stream)
+ 	return 0;
+ }
+ 
++int rift_sensor_uvc_stream_soft_restart(struct rift_sensor_uvc_stream *stream)
++{
++	int ret, i;
++
++	if (!stream->video_running)
++		return 0;
++
++	/* Halt the endpoint, then drain the in-flight transfers. The libusb
++	 * event thread keeps pumping and signals the waiters as each transfer
++	 * completes or cancels. */
++	ret = libusb_set_interface_alt_setting(stream->devh, 1, 0);
++	if (ret)
++		LOGW("Stream restart: failed to clear USB alt setting (%d)", ret);
++
++	libusb_lock_event_waiters(stream->usb_ctx);
++	stream->video_running = false;
++	while (stream->active_transfers > 0) {
++		if (libusb_wait_for_event(stream->usb_ctx, NULL))
++			break;
++	}
++	libusb_unlock_event_waiters(stream->usb_ctx);
++
++	/* Reset frame accumulation. All frame and transfer allocations are
++	 * kept - frames held by the analysis threads stay valid, and frame_id
++	 * -1 forces a clean new-frame start. */
++	stream->frame_collected = 0;
++	stream->skip_frame = false;
++	stream->frame_id = -1;
++	stream->consecutive_short_frames = 0;
++	stream->short_frames_since_log = 0;
++
++	ret = libusb_set_interface_alt_setting(stream->devh, 1, stream->alt_setting);
++	if (ret) {
++		LOGE("Stream restart: failed to restore alt setting %d (%d)", stream->alt_setting, ret);
++		return ret;
++	}
++
++	stream->video_running = true;
++	for (i = 0; i < stream->num_transfers; i++) {
++		ret = libusb_submit_transfer(stream->transfer[i]);
++		if (ret < 0) {
++			LOGE("Stream restart: resubmit of transfer %d failed (%d)", i, ret);
++			stream->active_transfers = i;
++			stream->video_running = false;
++			return ret;
++		}
++	}
++	stream->active_transfers = stream->num_transfers;
++
++	return 0;
++}
++
+ int rift_sensor_uvc_stream_clear (struct rift_sensor_uvc_stream *stream)
+ {
+ 	int i;
+--- a/src/drv_oculus_rift/sensor/uvc.h
++++ b/src/drv_oculus_rift/sensor/uvc.h
+@@ -36,6 +36,12 @@ struct rift_sensor_uvc_stream {
+ 	/* true if we're skipping the current frame */
+ 	bool skip_frame;
+ 
++	/* Consecutive frames that arrived short. A desynced iso stream drops
++	 * every frame from then on; the watchdog uses this count to spot it. */
++	int consecutive_short_frames;
++	/* Short frames since the last log line, for rate limiting. */
++	int short_frames_since_log;
++
+ 	/* Time at which we started skipping frames */
+ 	uint64_t skip_frame_start;
+ 
+@@ -72,6 +78,12 @@ int rift_sensor_uvc_stream_start(rift_sensor_uvc_stream *stream, uint8_t min_fra
+ 
+ int rift_sensor_uvc_stream_stop(rift_sensor_uvc_stream *stream);
+ 
++/* Drain the in-flight iso transfers, re-negotiate the streaming alt setting and
++ * resubmit, keeping all frame allocations. Recovers a desynced stream (endless
++ * short frames). Must NOT be called from the libusb event thread - the drain
++ * relies on that thread pumping events. */
++int rift_sensor_uvc_stream_soft_restart(rift_sensor_uvc_stream *stream);
++
+ /* This can only be called safely either before the stream is started
+  * or from one of the callbacks */
+ bool rift_sensor_uvc_stream_set_frame(rift_sensor_uvc_stream *stream, ohmd_video_frame *frame);
